@@ -1,0 +1,11 @@
+[package]
+name = "typing_test"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rand = "0.8.5"
+terminal_size = "0.1.17"
+crossterm = "0.23.0"
