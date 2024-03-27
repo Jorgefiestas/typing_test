@@ -29,6 +29,7 @@ struct TypingTest<'a> {
     dq: VecDeque<Vec<&'a str>>,
     cursor_index: (usize, usize),
     h_idx: usize,
+    line_errors: Vec<usize>,
     chars_typed: Arc<AtomicU16>,
     errors_typed: Arc<AtomicU16>,
     state: Arc<AtomicBool>,
@@ -41,6 +42,7 @@ impl<'a> TypingTest<'a> {
             dq: VecDeque::new(),
             cursor_index: (0, 0),
             h_idx: 0,
+            line_errors: Vec::new(),
             chars_typed: Arc::new(AtomicU16::new(0)),
             errors_typed: Arc::new(AtomicU16::new(0)),
             state: Arc::new(AtomicBool::new(true)),
@@ -60,7 +62,7 @@ impl<'a> TypingTest<'a> {
         self.cursor_index = (0, 0);
         self.h_idx = get_padding(&self.dq[1]);
 
-        full_redraw(&self.dq);
+        full_redraw(&self.dq, true, None);
 
         let state_clone = self.state.clone();
         let chars_typed_clone = self.chars_typed.clone();
@@ -108,7 +110,8 @@ impl<'a> TypingTest<'a> {
                 self.dq.pop_front();
                 self.dq.push_back(get_random_line(&self.word_bank));
 
-                full_redraw(&self.dq);
+                full_redraw(&self.dq, false, Some(&self.line_errors));
+                self.line_errors.clear();
 
                 self.cursor_index = (0, 0);
                 self.h_idx = get_padding(&self.dq[1]);
@@ -142,6 +145,13 @@ impl<'a> TypingTest<'a> {
                 char_redraw(ch, self.h_idx as u16, Color::DarkGrey);
             }
         }
+
+        if let Some(&last_error) = self.line_errors.last() {
+            if self.h_idx == last_error {
+                self.errors_typed.fetch_sub(1, Ordering::SeqCst);
+                self.line_errors.pop();
+            }
+        }
     }
 
     fn process_char(&mut self, ch: char) {
@@ -157,6 +167,7 @@ impl<'a> TypingTest<'a> {
 
         if ch != correct_ch {
             self.errors_typed.fetch_add(1, Ordering::SeqCst);
+            self.line_errors.push(self.h_idx);
             correct_ch = if correct_ch == ' ' { '_' } else { correct_ch };
             char_redraw(correct_ch, self.h_idx as u16, Color::Red);
         } else {
@@ -274,7 +285,7 @@ fn get_padding(words: &[&str]) -> usize {
     (width - text_length) / 2
 }
 
-fn print_centered_words(words: &[&str], row_idx: u16, color: Color) {
+fn print_centered_words(words: &[&str], row_idx: u16, color: Color, errors: Option<&[usize]>) {
     let text = words.join(" ");
     let text_length = text.chars().count();
 
@@ -287,9 +298,24 @@ fn print_centered_words(words: &[&str], row_idx: u16, color: Color) {
         stdout.lock(),
         MoveTo(horizontal_padding as u16, row_idx as u16),
         SetForegroundColor(color),
-        Print(text)
+        Print(&text)
     )
     .expect("Failed to print text");
+
+    if let Some(error_list) = errors {
+        for idx in error_list {
+            let mut ch = text.chars().nth(idx - horizontal_padding).unwrap_or(' ');
+            ch = if ch == ' ' { '_' } else { ch };
+
+            execute!(
+                stdout.lock(),
+                MoveTo(*idx as u16, row_idx as u16),
+                SetForegroundColor(Color::Red),
+                Print(ch)
+            )
+            .unwrap();
+        }
+    }
 }
 
 fn char_redraw(c: char, h_idx: u16, color: Color) {
@@ -309,28 +335,29 @@ fn char_redraw(c: char, h_idx: u16, color: Color) {
     stdout.flush().unwrap();
 }
 
-fn full_redraw(dq: &VecDeque<Vec<&str>>) {
+fn full_redraw(dq: &VecDeque<Vec<&str>>, clear_metrics: bool, errors: Option<&[usize]>) {
     let mut stdout = std::io::stdout();
-    execute!(
-        stdout.lock(),
-        MoveTo(0, 5),
-        Clear(ClearType::FromCursorDown)
-    )
-    .unwrap();
+
+    if clear_metrics {
+        execute!(stdout.lock(), Clear(ClearType::All)).unwrap();
+    } else {
+        execute!(
+            stdout.lock(),
+            MoveTo(0, 5),
+            Clear(ClearType::FromCursorDown)
+        )
+        .unwrap();
+    }
 
     let (_, height) = terminal_size().unwrap();
-    let vertical_center = height / 2;
+    let v_center = height / 2;
 
-    for (i, line) in dq.iter().enumerate().take(3) {
-        if line.is_empty() {
-            continue;
-        }
-        let v_idx = vertical_center - 1 + i as u16;
-        let color = match i {
-            0 => Color::Grey,
-            _ => Color::DarkGrey,
-        };
-        print_centered_words(&dq[i], v_idx, color);
+    if !dq[0].is_empty() {
+        print_centered_words(&dq[0], v_center - 1, Color::White, errors);
+    }
+    for i in 1..3 {
+        let v_idx = v_center - 1 + i as u16;
+        print_centered_words(&dq[i], v_idx, Color::DarkGrey, None);
     }
 
     stdout.flush().unwrap();
