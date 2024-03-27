@@ -58,7 +58,7 @@ impl<'a> TypingTest<'a> {
         full_redraw(&self.dq);
     }
 
-    fn run(mut self) -> usize {
+    fn run(mut self) {
         self.init();
 
         let state_clone = self.state.clone();
@@ -85,8 +85,6 @@ impl<'a> TypingTest<'a> {
                 self.h_idx = get_padding(&self.dq[1]);
             }
         }
-
-        0
     }
 
     fn process_backspace(&mut self) {
@@ -128,7 +126,7 @@ impl<'a> TypingTest<'a> {
             Color::Red
         };
 
-        char_redraw(ch, self.h_idx as u16, color);
+        char_redraw(correct_ch, self.h_idx as u16, color);
 
         self.h_idx += 1;
         if self.cursor_index.1 < word_len {
