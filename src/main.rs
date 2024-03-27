@@ -1,10 +1,9 @@
-use crossterm::cursor::{RestorePosition, SavePosition};
 use crossterm::style::{Color, SetForegroundColor};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -30,6 +29,8 @@ struct TypingTest<'a> {
     dq: VecDeque<Vec<&'a str>>,
     cursor_index: (usize, usize),
     h_idx: usize,
+    chars_typed: Arc<AtomicU16>,
+    errors_typed: Arc<AtomicU16>,
     state: Arc<AtomicBool>,
 }
 
@@ -40,12 +41,16 @@ impl<'a> TypingTest<'a> {
             dq: VecDeque::new(),
             cursor_index: (0, 0),
             h_idx: 0,
+            chars_typed: Arc::new(AtomicU16::new(0)),
+            errors_typed: Arc::new(AtomicU16::new(0)),
             state: Arc::new(AtomicBool::new(true)),
         }
     }
 
-    fn init(&mut self) {
+    fn init(&mut self) -> thread::JoinHandle<()> {
         self.state.store(true, Ordering::SeqCst);
+        self.chars_typed.store(0, Ordering::SeqCst);
+        self.errors_typed.store(0, Ordering::SeqCst);
 
         self.dq = (0..Q_SIZE)
             .map(|_| get_random_line(self.word_bank))
@@ -56,23 +61,47 @@ impl<'a> TypingTest<'a> {
         self.h_idx = get_padding(&self.dq[1]);
 
         full_redraw(&self.dq);
-    }
-
-    fn run(mut self) -> usize {
-        self.init();
 
         let state_clone = self.state.clone();
-        thread::spawn(move || update_timer(state_clone, Instant::now(), Duration::new(30, 0)));
+        let chars_typed_clone = self.chars_typed.clone();
+        let errors_typed_clone = self.errors_typed.clone();
+        thread::spawn(move || {
+            update_timer(
+                state_clone,
+                Instant::now(),
+                Duration::new(30, 0),
+                chars_typed_clone,
+                errors_typed_clone,
+            )
+        })
+    }
 
-        while self.state.load(Ordering::SeqCst) {
-            if let Event::Key(key_event) = read().unwrap() {
-                match key_event.code {
-                    KeyCode::Esc => self.state.store(false, Ordering::SeqCst),
-                    KeyCode::Tab => self.init(),
-                    KeyCode::Backspace => self.process_backspace(),
-                    KeyCode::Char(c) => self.process_char(c),
-                    _ => {}
+    fn run(mut self) {
+        let mut timer_thread = self.init();
+
+        loop {
+            if !self.state.load(Ordering::SeqCst) {
+                match get_key_code() {
+                    KeyCode::Tab => timer_thread = self.init(),
+                    KeyCode::Esc => break,
+                    _ => (),
                 }
+                continue;
+            }
+
+            match get_key_code() {
+                KeyCode::Esc => {
+                    self.state.store(false, Ordering::SeqCst);
+                    break;
+                }
+                KeyCode::Tab => {
+                    self.state.store(false, Ordering::SeqCst);
+                    timer_thread.join().expect("Timer panicked!");
+                    timer_thread = self.init()
+                }
+                KeyCode::Char(c) => self.process_char(c),
+                KeyCode::Backspace => self.process_backspace(),
+                _ => {}
             }
 
             if self.cursor_index.0 == self.dq[1].len() {
@@ -85,12 +114,14 @@ impl<'a> TypingTest<'a> {
                 self.h_idx = get_padding(&self.dq[1]);
             }
         }
-
-        0
     }
 
     fn process_backspace(&mut self) {
         let line: &[&str] = &self.dq[1];
+
+        if self.cursor_index > (0, 0) && self.chars_typed.load(Ordering::SeqCst) > 0 {
+            self.chars_typed.fetch_sub(1, Ordering::SeqCst);
+        }
 
         match self.cursor_index {
             (0, 0) => (),
@@ -117,18 +148,20 @@ impl<'a> TypingTest<'a> {
         let line: &[&str] = &self.dq[1];
         let word_len = line[self.cursor_index.0].len();
 
-        let correct_ch = line[self.cursor_index.0]
+        self.chars_typed.fetch_add(1, Ordering::SeqCst);
+
+        let mut correct_ch = line[self.cursor_index.0]
             .chars()
             .nth(self.cursor_index.1)
             .unwrap_or(' ');
 
-        let color = if ch == correct_ch {
-            Color::White
+        if ch != correct_ch {
+            self.errors_typed.fetch_add(1, Ordering::SeqCst);
+            correct_ch = if correct_ch == ' ' { '_' } else { correct_ch };
+            char_redraw(correct_ch, self.h_idx as u16, Color::Red);
         } else {
-            Color::Red
-        };
-
-        char_redraw(ch, self.h_idx as u16, color);
+            char_redraw(correct_ch, self.h_idx as u16, Color::White);
+        }
 
         self.h_idx += 1;
         if self.cursor_index.1 < word_len {
@@ -140,8 +173,20 @@ impl<'a> TypingTest<'a> {
     }
 }
 
-fn update_timer(state: Arc<AtomicBool>, start_time: Instant, duration: Duration) {
+fn update_timer(
+    state: Arc<AtomicBool>,
+    start_time: Instant,
+    duration: Duration,
+    chars_typed: Arc<AtomicU16>,
+    errors_typed: Arc<AtomicU16>,
+) {
     let mut stdout = std::io::stdout();
+
+    let (width, _) = terminal_size().unwrap();
+    let width = width as usize;
+
+    let timer_padding = (width - 5) / 2;
+    let metrics_padding = (width - 100) / 2;
 
     while state.load(Ordering::SeqCst) {
         let elapsed = start_time.elapsed();
@@ -149,17 +194,38 @@ fn update_timer(state: Arc<AtomicBool>, start_time: Instant, duration: Duration)
             break;
         }
 
+        let typed = chars_typed.load(Ordering::SeqCst) as f32;
+        let errors = errors_typed.load(Ordering::SeqCst) as f32;
+        let elapsed_min = elapsed.as_secs_f32() / 60.0;
+
+        let wpm = if elapsed_min > 0.0 {
+            (typed / elapsed_min / 5.0) as u16
+        } else {
+            0
+        };
+
+        let acc = if typed > 0.0 {
+            (100.0 * (typed - errors) / typed) as u16
+        } else {
+            100
+        };
+
+        let wpm_text = format!("WPM {:3}", wpm);
+        let acc_text = format!("ACC {:3}%", acc);
+
         let remaining = duration - elapsed;
         let mins = remaining.as_secs() / 60;
         let secs = remaining.as_secs() % 60;
 
         execute!(
             stdout.lock(),
-            SavePosition,
-            MoveTo(0, 0),
             SetForegroundColor(Color::White),
+            MoveTo(metrics_padding as u16, 1),
+            Print(wpm_text),
+            MoveTo(metrics_padding as u16, 2),
+            Print(acc_text),
+            MoveTo(timer_padding as u16, 4),
             Print(format!("{:02}:{:02}", mins, secs)),
-            RestorePosition,
         )
         .unwrap();
         stdout.flush().unwrap();
@@ -167,6 +233,13 @@ fn update_timer(state: Arc<AtomicBool>, start_time: Instant, duration: Duration)
         thread::sleep(Duration::from_millis(500));
     }
     state.store(false, Ordering::SeqCst);
+}
+
+fn get_key_code() -> KeyCode {
+    if let Event::Key(key_event) = read().unwrap() {
+        return key_event.code;
+    }
+    KeyCode::Char('$')
 }
 
 fn load_words() -> std::io::Result<Vec<String>> {
@@ -238,7 +311,12 @@ fn char_redraw(c: char, h_idx: u16, color: Color) {
 
 fn full_redraw(dq: &VecDeque<Vec<&str>>) {
     let mut stdout = std::io::stdout();
-    execute!(stdout.lock(), Clear(ClearType::All)).unwrap();
+    execute!(
+        stdout.lock(),
+        MoveTo(0, 5),
+        Clear(ClearType::FromCursorDown)
+    )
+    .unwrap();
 
     let (_, height) = terminal_size().unwrap();
     let vertical_center = height / 2;
@@ -248,7 +326,10 @@ fn full_redraw(dq: &VecDeque<Vec<&str>>) {
             continue;
         }
         let v_idx = vertical_center - 1 + i as u16;
-        let color = if i < 1 { Color::White } else { Color::DarkGrey };
+        let color = match i {
+            0 => Color::Grey,
+            _ => Color::DarkGrey,
+        };
         print_centered_words(&dq[i], v_idx, color);
     }
 
