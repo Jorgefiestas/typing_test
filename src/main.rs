@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -58,17 +58,22 @@ impl<'a> TypingTest<'a> {
         full_redraw(&self.dq);
     }
 
-    fn run(mut self) -> usize {
+    fn run(mut self) {
         self.init();
 
         let state_clone = self.state.clone();
-        thread::spawn(move || update_timer(state_clone, Instant::now(), Duration::new(30, 0)));
+        let time = Arc::new(Mutex::new(Instant::now()));
+        let time_clone = Arc::clone(&time);
+        thread::spawn(move || update_timer(state_clone, time_clone, Duration::new(30, 0)));
 
         while self.state.load(Ordering::SeqCst) {
             if let Event::Key(key_event) = read().unwrap() {
                 match key_event.code {
                     KeyCode::Esc => self.state.store(false, Ordering::SeqCst),
-                    KeyCode::Tab => self.init(),
+                    KeyCode::Tab => {
+                        *time.lock().unwrap() = Instant::now();
+                        self.init()
+                    }
                     KeyCode::Backspace => self.process_backspace(),
                     KeyCode::Char(c) => self.process_char(c),
                     _ => {}
@@ -85,8 +90,6 @@ impl<'a> TypingTest<'a> {
                 self.h_idx = get_padding(&self.dq[1]);
             }
         }
-
-        0
     }
 
     fn process_backspace(&mut self) {
@@ -128,7 +131,7 @@ impl<'a> TypingTest<'a> {
             Color::Red
         };
 
-        char_redraw(ch, self.h_idx as u16, color);
+        char_redraw(correct_ch, self.h_idx as u16, color);
 
         self.h_idx += 1;
         if self.cursor_index.1 < word_len {
@@ -140,11 +143,11 @@ impl<'a> TypingTest<'a> {
     }
 }
 
-fn update_timer(state: Arc<AtomicBool>, start_time: Instant, duration: Duration) {
+fn update_timer(state: Arc<AtomicBool>, start_time: Arc<Mutex<Instant>>, duration: Duration) {
     let mut stdout = std::io::stdout();
 
     while state.load(Ordering::SeqCst) {
-        let elapsed = start_time.elapsed();
+        let elapsed = start_time.lock().unwrap().elapsed();
         if elapsed >= duration {
             break;
         }
