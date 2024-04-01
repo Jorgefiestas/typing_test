@@ -40,4 +40,4 @@ Press `Tab` to start a new test and `Esc` to exit the app.
 Contributions are welcome! Please feel free to submit pull requests, report bugs, and suggest features.
 
 ## License
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License - see the [LICENSE](https://github.com/Jorgefiestas/typing_test?tab=MIT-1-ov-file) file for details.
