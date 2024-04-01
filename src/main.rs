@@ -21,8 +21,9 @@ use crossterm::{
 };
 
 const WORDS_PATH: &str = "words.txt";
-const Q_SIZE: usize = 20;
-const MAX_WIDTH: usize = 100;
+const Q_SIZE: usize = 10;
+const MAX_WIDTH: usize = 80;
+const TIME: u64 = 30;
 
 struct TypingTest<'a> {
     word_bank: &'a [String],
@@ -60,6 +61,7 @@ impl<'a> TypingTest<'a> {
         self.dq.push_front(vec![]);
 
         self.cursor_index = (0, 0);
+        self.line_errors.clear();
         self.h_idx = get_padding(&self.dq[1]);
 
         full_redraw(&self.dq, true, None);
@@ -67,11 +69,12 @@ impl<'a> TypingTest<'a> {
         let state_clone = self.state.clone();
         let chars_typed_clone = self.chars_typed.clone();
         let errors_typed_clone = self.errors_typed.clone();
+
         thread::spawn(move || {
             update_timer(
                 state_clone,
                 Instant::now(),
-                Duration::new(30, 0),
+                Duration::new(TIME, 0),
                 chars_typed_clone,
                 errors_typed_clone,
             )
@@ -197,7 +200,7 @@ fn update_timer(
     let width = width as usize;
 
     let timer_padding = (width - 5) / 2;
-    let metrics_padding = (width - 100) / 2;
+    let metrics_padding = (width - MAX_WIDTH) / 2;
 
     while state.load(Ordering::SeqCst) {
         let elapsed = start_time.elapsed();
@@ -302,19 +305,20 @@ fn print_centered_words(words: &[&str], row_idx: u16, color: Color, errors: Opti
     )
     .expect("Failed to print text");
 
-    if let Some(error_list) = errors {
-        for idx in error_list {
-            let mut ch = text.chars().nth(idx - horizontal_padding).unwrap_or(' ');
-            ch = if ch == ' ' { '_' } else { ch };
+    for idx in errors.unwrap_or(&[]) {
+        let ch = match text.chars().nth(idx - horizontal_padding) {
+            Some(' ') => '_',
+            Some(c) => c,
+            None => '_',
+        };
 
-            execute!(
-                stdout.lock(),
-                MoveTo(*idx as u16, row_idx as u16),
-                SetForegroundColor(Color::Red),
-                Print(ch)
-            )
-            .unwrap();
-        }
+        execute!(
+            stdout.lock(),
+            MoveTo(*idx as u16, row_idx as u16),
+            SetForegroundColor(Color::Red),
+            Print(ch)
+        )
+        .unwrap();
     }
 }
 
